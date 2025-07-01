@@ -50,6 +50,10 @@ pub struct SessionConfig {
     ///
     /// NOTE: Although we allow specifying multiple core configurations, this is a work in progress, and probe-rs-debugger currently only supports debugging a single core.
     pub(crate) core_configs: Vec<CoreConfig>,
+
+    /// VSCode launch.jsonのpathMapping
+    #[serde(default)]
+    pub path_mapping: Option<PathMapping>,
 }
 
 impl SessionConfig {
@@ -76,11 +80,30 @@ impl SessionConfig {
         // Update the `cwd`.
         self.cwd = self.resolve_cwd()?;
 
+        // Clone path_mapping to avoid borrowing self immutably inside the loop.
+        let path_mapping = self.path_mapping.clone();
+
         for target_core_config in &mut self.core_configs {
-            // Update the `program_binary` and validate that the file exists.
+            // まずpathMappingを適用
+            let mapped_program_binary = if let Some(program_binary) = &target_core_config.program_binary {
+                if let Some(mapping) = &path_mapping {
+                    // remoteRootがprefixならlocalRootに置換（逆方向もサポート）
+                    if let Ok(stripped) = program_binary.strip_prefix(&mapping.remote_root) {
+                        Some(mapping.local_root.join(stripped))
+                    } else {
+                        Some(program_binary.clone())
+                    }
+                } else {
+                    Some(program_binary.clone())
+                }
+            } else {
+                None
+            };
+
+            // その後、get_absolute_pathでcwdを考慮
             target_core_config.program_binary = match get_absolute_path(
                 self.cwd.as_ref(),
-                target_core_config.program_binary.as_ref(),
+                mapped_program_binary.as_ref(),
             ) {
                 Ok(program_binary) => {
                     if !program_binary.is_file() {
@@ -169,6 +192,14 @@ impl SessionConfig {
             allow_erase_all: self.allow_erase_all,
         }
     }
+}
+
+// VSCode launch.jsonのpathMappings用
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PathMapping {
+    pub local_root: PathBuf,
+    pub remote_root: PathBuf,
 }
 
 /// If the path to the program to be debugged is relative, we join if with the cwd.

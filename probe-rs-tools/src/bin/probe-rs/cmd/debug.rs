@@ -251,6 +251,7 @@ impl Cmd {
                     catch_hardfault: !self.no_catch_hardfault,
                     catch_reset: !self.no_catch_reset,
                 }],
+                path_mapping: None,
             })
             .ok(),
             seq: 1,
