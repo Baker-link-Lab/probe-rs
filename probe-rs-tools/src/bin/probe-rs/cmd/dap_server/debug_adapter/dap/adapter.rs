@@ -103,8 +103,8 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
     }
 
     /// Translate a local host path back to the DAP client's view (e.g. Docker container path).
-    /// Reverse of [`translate_remote_to_local`]. Normalises both sides to forward-slashes
-    /// before comparing so Windows backslashes are handled transparently.
+    /// Reverse of [`translate_path_to_local`] in `configuration.rs`. Normalises both sides
+    /// to forward-slashes before comparing so Windows backslashes are handled transparently.
     pub(crate) fn translate_local_to_remote(&self, path: &str) -> String {
         for m in &self.path_mappings {
             let norm_local = m.local_root.replace('\\', "/");
@@ -112,11 +112,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             if norm_path.starts_with(&norm_local) {
                 let suffix = &norm_path[norm_local.len()..];
                 let result = format!("{}{}", m.remote_root, suffix);
-                tracing::debug!(
-                    "[PathMap] local→remote: '{}' → '{}'",
-                    path,
-                    result
-                );
+                tracing::debug!("[PathMap] local->remote: '{}' -> '{}'", path, result);
                 return result;
             }
         }
@@ -825,34 +821,15 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
         // For returning in the Response
         let mut created_breakpoints: Vec<Breakpoint> = Vec::new();
 
-        // Build a TypedPath for DWARF lookup.
-        //
-        // When code is compiled inside a Docker container (the usual case for this
-        // project), DWARF debug info contains Linux-style paths such as
-        // /myproject3/src/main.rs.  VS Code inside the container also sends Linux paths.
-        // To get a match we must preserve them as Unix TypedPaths – NOT convert them to
-        // native Windows paths.
-        //
-        // When code is compiled on the host (less common) DWARF has Windows-style paths
-        // and no special handling is required.
-        //
-        // pathMappings only applies to file resolution (programBinary etc.) not to
-        // source path lookup here – see configuration.rs validate_config_files.
+        // If the source path starts with '/', it was compiled inside a container (Linux paths).
+        // Preserve it as a Unix TypedPath so it matches DWARF entries exactly.
         let source_path = if source_path.starts_with('/') {
-            // Linux/Unix-style path → Docker-compiled binary scenario.
-            // Preserve as Unix TypedPath so it matches Linux DWARF entries exactly.
             TypedPathBuf::from_unix(source_path.as_str())
         } else {
-            // Native host path (e.g. C:\ on Windows) → use native path as before.
             NativePathBuf::from(source_path.as_str()).to_typed_path_buf()
         };
 
         let bp_list = args.breakpoints.as_deref().unwrap_or_default();
-        self.log_to_console(format!(
-            "[BP] setBreakpoints: source_path='{}' count={}",
-            source_path.to_path().display(),
-            bp_list.len()
-        ));
 
         for bp in bp_list {
             // Some overrides to improve breakpoint accuracy when `DebugInfo::get_breakpoint_location()` has to select the best from multiple options
@@ -881,12 +858,6 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                     address,
                     source_location,
                 }) => {
-                    self.log_to_console(format!(
-                        "[BP] Verified breakpoint: path={} line={} -> address={:#010X}",
-                        source_path.to_path().display(),
-                        requested_breakpoint_line,
-                        address
-                    ));
                     Breakpoint {
                         column: source_location.column.map(|col| match col {
                             ColumnType::LeftEdge => 0_i64,
@@ -1060,7 +1031,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             );
         };
 
-        let frame_list: Vec<StackFrame> = frames
+        let mut frame_list: Vec<StackFrame> = frames
             .iter()
             .map(|frame| {
                 let column = frame
@@ -1110,9 +1081,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             })
             .collect();
 
-        // Apply path mapping: translate local host paths back to remote/container paths
-        // so VS Code (inside Docker or another remote) sees paths it can open.
-        let mut frame_list = frame_list;
+        // Translate local host paths back to the container paths VS Code expects.
         if !self.path_mappings.is_empty() {
             for frame in &mut frame_list {
                 if let Some(source) = &mut frame.source {
@@ -1125,10 +1094,8 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                                 source.path = Some(translated);
                             }
                         } else {
-                            // Case B: source is deemphasized → DWARF returned a container path
-                            // that does not exist on the host as-is.
-                            // Check whether the mapped host path exists; if so, clear the
-                            // deemphasize hint so VS Code can navigate to the file.
+                            // Case B: deemphasized frame with a container path — if the mapped
+                            // host path exists, clear the deemphasize hint so VS Code can open it.
                             let normalized = path.replace('\\', "/");
                             for m in &self.path_mappings {
                                 if normalized.starts_with(&m.remote_root) {
@@ -1140,9 +1107,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                                     let host_path =
                                         std::path::PathBuf::from(format!("{}{}", m.local_root, suffix));
                                     if host_path.exists() {
-                                        // File exists on host; return the container path
-                                        // (what VS Code inside the container expects) with
-                                        // the deemphasize hint removed.
+                                        // Host file found: update name and clear deemphasize.
                                         source.name = host_path
                                             .file_name()
                                             .map(|n| n.to_string_lossy().to_string());

@@ -784,6 +784,7 @@ impl CoreInterface for Armv6m<'_> {
 
         self.memory
             .write_word_32(BpCtrl::get_mmio_address(), value.into())?;
+        // Flush to ensure FP_CTRL write commits before any subsequent FP_COMP write.
         self.memory.flush()?;
 
         self.state.hw_breakpoints_enabled = state;
@@ -819,6 +820,7 @@ impl CoreInterface for Armv6m<'_> {
             BpCompx::get_mmio_address() + (bp_register_index * size_of::<u32>()) as u64;
 
         self.memory.write_word_32(register_addr, value.into())?;
+        // Flush to ensure FP_COMP write is committed to hardware immediately.
         self.memory.flush()?;
 
         Ok(())

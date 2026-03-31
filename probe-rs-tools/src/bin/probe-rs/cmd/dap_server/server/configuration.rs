@@ -17,14 +17,12 @@ use super::startup::TargetSessionType;
 ///   { "remoteRoot": "/workspaces/myproject", "localRoot": "C:\\Users\\...\\myproject" }
 /// ]
 /// ```
-#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PathMapping {
     /// Path prefix as seen by the debugger client (e.g. inside a Docker container).
-    /// Example: `"/workspaces/myproject"`
     pub remote_root: String,
     /// Path prefix on the host running probe-rs (Windows or macOS).
-    /// Example: `"C:\\Users\\user\\Desktop\\myproject"`
     pub local_root: String,
 }
 
@@ -106,15 +104,14 @@ impl SessionConfig {
         let path_mappings = self.path_mappings.clone();
 
         for target_core_config in &mut self.core_configs {
-            // Apply path mappings before resolving & validating paths.
-            // This translates container/remote prefixes (e.g. /myproject3) to host
-            // paths (e.g. C:\Users\...\myproject3) so probe-rs can open the files.
-            if let Some(ref p) = target_core_config.program_binary.clone() {
+            // Apply path mappings before resolving & validating paths,
+            // translating container prefixes (e.g. /myproject) to host paths.
+            if let Some(p) = target_core_config.program_binary.clone() {
                 target_core_config.program_binary =
-                    Some(translate_path_to_local(&path_mappings, p));
+                    Some(translate_path_to_local(&path_mappings, &p));
             }
-            if let Some(ref p) = target_core_config.svd_file.clone() {
-                target_core_config.svd_file = Some(translate_path_to_local(&path_mappings, p));
+            if let Some(p) = target_core_config.svd_file.clone() {
+                target_core_config.svd_file = Some(translate_path_to_local(&path_mappings, &p));
             }
 
             // Update the `program_binary` and validate that the file exists.
@@ -157,8 +154,8 @@ impl SessionConfig {
         }
 
         // Apply path mapping to chip_description_path.
-        if let Some(ref p) = self.chip_description_path.clone() {
-            self.chip_description_path = Some(translate_path_to_local(&path_mappings, p));
+        if let Some(p) = self.chip_description_path.clone() {
+            self.chip_description_path = Some(translate_path_to_local(&path_mappings, &p));
         }
 
         self.chip_description_path =
@@ -245,9 +242,6 @@ fn get_absolute_path(
 /// translated suffix is normalised to `\`.  Returns the path unchanged if no mapping matches.
 pub(crate) fn translate_path_to_local(mappings: &[PathMapping], path: &PathBuf) -> PathBuf {
     let path_str = path.to_string_lossy();
-    // Normalise to forward-slashes for prefix comparison so that Windows
-    // PathBuf representations (which may use '\') still match a '/' prefix
-    // like "/myproject3" that came from the Docker container.
     let path_normalized = path_str.replace('\\', "/");
     for m in mappings {
         if path_normalized.starts_with(&m.remote_root) {
@@ -258,7 +252,7 @@ pub(crate) fn translate_path_to_local(mappings: &[PathMapping], path: &PathBuf) 
             let suffix = suffix.to_string();
             let translated = format!("{}{}", m.local_root, suffix);
             tracing::debug!(
-                "[PathMap] config path remapped: '{}' → '{}'",
+                "[PathMap] config path remapped: '{}' -> '{}'",
                 path_str,
                 translated
             );

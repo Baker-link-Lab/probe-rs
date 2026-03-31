@@ -437,10 +437,7 @@ impl<'probe> Core<'probe> {
     /// and can be queried using the `get_available_breakpoint_units` function.
     #[tracing::instrument(skip(self))]
     pub fn set_hw_breakpoint_unit(&mut self, unit_index: usize, addr: u64) -> Result<(), Error> {
-        // Always enable FPB before setting a comparator.
-        // The hardware ENABLE bit can be silently cleared by the target's boot ROM
-        // (e.g. RP2040) after reset_and_halt, so relying on the cached
-        // hw_breakpoints_enabled state is not reliable.
+        // Same rationale as set_hw_breakpoint: boot ROM (e.g. RP2040) can silently clear FP_CTRL.
         self.enable_breakpoints(true)?;
 
         tracing::debug!(
