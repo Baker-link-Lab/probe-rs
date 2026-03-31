@@ -401,9 +401,11 @@ impl<'probe> Core<'probe> {
     /// and can be queried using the `get_available_breakpoint_units` function.
     #[tracing::instrument(skip(self))]
     pub fn set_hw_breakpoint(&mut self, address: u64) -> Result<(), Error> {
-        if !self.inner.hw_breakpoints_enabled() {
-            self.enable_breakpoints(true)?;
-        }
+        // Always enable FPB before setting a comparator.
+        // The hardware ENABLE bit can be silently cleared by the target's boot ROM
+        // (e.g. RP2040) after reset_and_halt, so relying on the cached
+        // hw_breakpoints_enabled state is not reliable.
+        self.enable_breakpoints(true)?;
 
         // If there is a breakpoint set already, return its bp_unit_index, else find the next free index.
         let breakpoints = self.inner.hw_breakpoints()?;
@@ -435,9 +437,11 @@ impl<'probe> Core<'probe> {
     /// and can be queried using the `get_available_breakpoint_units` function.
     #[tracing::instrument(skip(self))]
     pub fn set_hw_breakpoint_unit(&mut self, unit_index: usize, addr: u64) -> Result<(), Error> {
-        if !self.inner.hw_breakpoints_enabled() {
-            self.enable_breakpoints(true)?;
-        }
+        // Always enable FPB before setting a comparator.
+        // The hardware ENABLE bit can be silently cleared by the target's boot ROM
+        // (e.g. RP2040) after reset_and_halt, so relying on the cached
+        // hw_breakpoints_enabled state is not reliable.
+        self.enable_breakpoints(true)?;
 
         tracing::debug!(
             "Trying to set HW breakpoint #{} with comparator address  {:#08x}",

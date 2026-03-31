@@ -782,9 +782,16 @@ impl CoreInterface for Armv6m<'_> {
         value.set_key(true);
         value.set_enable(state);
 
+        let write_val: u32 = value.into();
         self.memory
-            .write_word_32(BpCtrl::get_mmio_address(), value.into())?;
+            .write_word_32(BpCtrl::get_mmio_address(), write_val)?;
         self.memory.flush()?;
+
+        let readback = self.memory.read_word_32(BpCtrl::get_mmio_address())?;
+        tracing::warn!(
+            "[FPB] enable_breakpoints({}) wrote={:#010X} readback FP_CTRL={:#010X}",
+            state, write_val, readback
+        );
 
         self.state.hw_breakpoints_enabled = state;
 
@@ -819,6 +826,7 @@ impl CoreInterface for Armv6m<'_> {
             BpCompx::get_mmio_address() + (bp_register_index * size_of::<u32>()) as u64;
 
         self.memory.write_word_32(register_addr, value.into())?;
+        self.memory.flush()?;
 
         Ok(())
     }

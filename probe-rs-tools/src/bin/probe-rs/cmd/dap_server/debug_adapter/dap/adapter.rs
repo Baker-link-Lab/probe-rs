@@ -14,7 +14,7 @@ use crate::cmd::dap_server::{
         protocol::{ProtocolAdapter, ProtocolHelper},
     },
     server::{
-        configuration::ConsoleLog,
+        configuration::{ConsoleLog, PathMapping},
         core_data::CoreHandle,
         session_data::{BreakpointType, SourceLocationScope},
     },
@@ -25,7 +25,7 @@ use base64::{Engine as _, engine::general_purpose as base64_engine};
 use dap_types::*;
 use parse_int::parse;
 use probe_rs::{
-    CoreInformation, CoreStatus, Error, HaltReason,
+    CoreInformation, CoreStatus, Error, HaltReason, MemoryInterface,
     architecture::{
         arm::ArmError, riscv::communication_interface::RiscvError,
         xtensa::communication_interface::XtensaError,
@@ -37,7 +37,7 @@ use probe_rs_debug::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use typed_path::NativePathBuf;
+use typed_path::{NativePathBuf, TypedPathBuf};
 
 use std::{fmt::Display, str, time::Duration};
 
@@ -76,6 +76,9 @@ pub struct DebugAdapter<P: ProtocolAdapter + ?Sized> {
     /// Flag to indicate that workarounds for VSCode-specific spec deviations etc. should be
     /// enabled.
     pub(crate) vscode_quirks: bool,
+    /// Path mappings for remote debugging (e.g. Docker containers).
+    /// Populated from `SessionConfig::path_mappings` after the launch/attach request.
+    pub(crate) path_mappings: Vec<PathMapping>,
     adapter: P,
 }
 
@@ -90,12 +93,34 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             supports_progress_reporting: false,
             lines_start_at_1: true,
             columns_start_at_1: true,
+            path_mappings: Vec::new(),
             adapter,
         }
     }
 
     pub(crate) fn configuration_is_done(&self) -> bool {
         self.configuration_done
+    }
+
+    /// Translate a local host path back to the DAP client's view (e.g. Docker container path).
+    /// Reverse of [`translate_remote_to_local`]. Normalises both sides to forward-slashes
+    /// before comparing so Windows backslashes are handled transparently.
+    pub(crate) fn translate_local_to_remote(&self, path: &str) -> String {
+        for m in &self.path_mappings {
+            let norm_local = m.local_root.replace('\\', "/");
+            let norm_path = path.replace('\\', "/");
+            if norm_path.starts_with(&norm_local) {
+                let suffix = &norm_path[norm_local.len()..];
+                let result = format!("{}{}", m.remote_root, suffix);
+                tracing::debug!(
+                    "[PathMap] local→remote: '{}' → '{}'",
+                    path,
+                    result
+                );
+                return result;
+            }
+        }
+        path.to_string()
     }
 
     pub(crate) fn pause(
@@ -800,10 +825,36 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
         // For returning in the Response
         let mut created_breakpoints: Vec<Breakpoint> = Vec::new();
 
-        // Assume that the path is native to the current OS
-        let source_path = NativePathBuf::from(source_path).to_typed_path_buf();
+        // Build a TypedPath for DWARF lookup.
+        //
+        // When code is compiled inside a Docker container (the usual case for this
+        // project), DWARF debug info contains Linux-style paths such as
+        // /myproject3/src/main.rs.  VS Code inside the container also sends Linux paths.
+        // To get a match we must preserve them as Unix TypedPaths – NOT convert them to
+        // native Windows paths.
+        //
+        // When code is compiled on the host (less common) DWARF has Windows-style paths
+        // and no special handling is required.
+        //
+        // pathMappings only applies to file resolution (programBinary etc.) not to
+        // source path lookup here – see configuration.rs validate_config_files.
+        let source_path = if source_path.starts_with('/') {
+            // Linux/Unix-style path → Docker-compiled binary scenario.
+            // Preserve as Unix TypedPath so it matches Linux DWARF entries exactly.
+            TypedPathBuf::from_unix(source_path.as_str())
+        } else {
+            // Native host path (e.g. C:\ on Windows) → use native path as before.
+            NativePathBuf::from(source_path.as_str()).to_typed_path_buf()
+        };
 
-        for bp in args.breakpoints.as_deref().unwrap_or_default() {
+        let bp_list = args.breakpoints.as_deref().unwrap_or_default();
+        self.log_to_console(format!(
+            "[BP] setBreakpoints: source_path='{}' count={}",
+            source_path.to_path().display(),
+            bp_list.len()
+        ));
+
+        for bp in bp_list {
             // Some overrides to improve breakpoint accuracy when `DebugInfo::get_breakpoint_location()` has to select the best from multiple options
             let requested_breakpoint_line = if self.lines_start_at_1 {
                 // If the debug client uses 1 based numbering, then we can use it as is.
@@ -829,37 +880,53 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                 Ok(VerifiedBreakpoint {
                     address,
                     source_location,
-                }) => Breakpoint {
-                    column: source_location.column.map(|col| match col {
-                        ColumnType::LeftEdge => 0_i64,
-                        ColumnType::Column(c) => c as i64,
-                    }),
-                    end_column: None,
-                    end_line: None,
-                    id: Some(address as i64),
-                    line: source_location.line.map(|line| line as i64),
-                    message: Some(format!(
-                        "Source breakpoint at memory address: {address:#010X}"
-                    )),
-                    source: Some(args.source.clone()),
-                    instruction_reference: Some(format!("{address:#010X}")),
-                    offset: None,
-                    verified: true,
-                    reason: None,
-                },
-                Err(error) => Breakpoint {
-                    column: None,
-                    end_column: None,
-                    end_line: None,
-                    id: None,
-                    line: Some(bp.line),
-                    message: Some(error.to_string()),
-                    source: None,
-                    instruction_reference: None,
-                    offset: None,
-                    verified: false,
-                    reason: Some("failed".to_string()),
-                },
+                }) => {
+                    self.log_to_console(format!(
+                        "[BP] Verified breakpoint: path={} line={} -> address={:#010X}",
+                        source_path.to_path().display(),
+                        requested_breakpoint_line,
+                        address
+                    ));
+                    Breakpoint {
+                        column: source_location.column.map(|col| match col {
+                            ColumnType::LeftEdge => 0_i64,
+                            ColumnType::Column(c) => c as i64,
+                        }),
+                        end_column: None,
+                        end_line: None,
+                        id: Some(address as i64),
+                        line: source_location.line.map(|line| line as i64),
+                        message: Some(format!(
+                            "Source breakpoint at memory address: {address:#010X}"
+                        )),
+                        source: Some(args.source.clone()),
+                        instruction_reference: Some(format!("{address:#010X}")),
+                        offset: None,
+                        verified: true,
+                        reason: None,
+                    }
+                }
+                Err(error) => {
+                    self.log_to_console(format!(
+                        "[BP] UNVERIFIED breakpoint: path={} line={} -> {}",
+                        source_path.to_path().display(),
+                        requested_breakpoint_line,
+                        error
+                    ));
+                    Breakpoint {
+                        column: None,
+                        end_column: None,
+                        end_line: None,
+                        id: None,
+                        line: Some(bp.line),
+                        message: Some(error.to_string()),
+                        source: None,
+                        instruction_reference: None,
+                        offset: None,
+                        verified: false,
+                        reason: Some("failed".to_string()),
+                    }
+                }
             };
 
             created_breakpoints.push(bp);
@@ -1042,6 +1109,53 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                 }
             })
             .collect();
+
+        // Apply path mapping: translate local host paths back to remote/container paths
+        // so VS Code (inside Docker or another remote) sees paths it can open.
+        let mut frame_list = frame_list;
+        if !self.path_mappings.is_empty() {
+            for frame in &mut frame_list {
+                if let Some(source) = &mut frame.source {
+                    if let Some(path) = source.path.clone() {
+                        // Case A: source is NOT deemphasized → DWARF found a host-local path.
+                        // Translate it back to the container path for VS Code.
+                        if source.presentation_hint.as_deref() != Some("deemphasize") {
+                            let translated = self.translate_local_to_remote(&path);
+                            if translated != path {
+                                source.path = Some(translated);
+                            }
+                        } else {
+                            // Case B: source is deemphasized → DWARF returned a container path
+                            // that does not exist on the host as-is.
+                            // Check whether the mapped host path exists; if so, clear the
+                            // deemphasize hint so VS Code can navigate to the file.
+                            let normalized = path.replace('\\', "/");
+                            for m in &self.path_mappings {
+                                if normalized.starts_with(&m.remote_root) {
+                                    let suffix = &normalized[m.remote_root.len()..];
+                                    #[cfg(windows)]
+                                    let suffix = suffix.replace('/', "\\");
+                                    #[cfg(not(windows))]
+                                    let suffix = suffix.to_string();
+                                    let host_path =
+                                        std::path::PathBuf::from(format!("{}{}", m.local_root, suffix));
+                                    if host_path.exists() {
+                                        // File exists on host; return the container path
+                                        // (what VS Code inside the container expects) with
+                                        // the deemphasize hint removed.
+                                        source.name = host_path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string());
+                                        source.presentation_hint = None;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Return the frame list. NOTE: we could manipulate total_frames to page results instead of returning all frames at once
         let body = StackTraceResponseBody {
@@ -1754,6 +1868,32 @@ impl<P: ProtocolAdapter + ?Sized> DebugAdapter<P> {
 
     /// Returns whether all cores are halted.
     pub(crate) fn continue_impl(&mut self, target_core: &mut CoreHandle<'_>) -> Result<bool> {
+        // Log current PC and breakpoint cache before running the core.
+        let pc = target_core
+            .core
+            .read_core_reg::<u64>(target_core.core.program_counter())
+            .map(|v| format!("{v:#010X}"))
+            .unwrap_or_else(|_| "?".to_string());
+        let bp_summary: Vec<String> = target_core
+            .core_data
+            .breakpoints
+            .iter()
+            .map(|bp| format!("{:#010X}", bp.address))
+            .collect();
+        // Read FPB hardware registers right before run() to verify state.
+        let fp_ctrl = target_core.core.read_word_32(0xE000_2000).map(|v| format!("{v:#010X}")).unwrap_or_else(|_| "err".to_string());
+        let fp_comp0 = target_core.core.read_word_32(0xE000_2008).map(|v| format!("{v:#010X}")).unwrap_or_else(|_| "err".to_string());
+        tracing::warn!(
+            "[BP] continue: PC={}, FP_CTRL={}, FP_COMP0={}, registered breakpoints → [{}]",
+            pc,
+            fp_ctrl,
+            fp_comp0,
+            if bp_summary.is_empty() {
+                "none".to_string()
+            } else {
+                bp_summary.join(", ")
+            }
+        );
         target_core.core.run()?;
         target_core.reset_core_status(self);
 

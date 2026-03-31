@@ -445,6 +445,7 @@ impl Debugger {
         )?;
 
         debug_adapter.halt_after_reset = self.config.flashing_config.halt_after_reset;
+        debug_adapter.path_mappings = self.config.path_mappings.clone();
 
         let Some(target_core_config) = self.config.core_configs.first() else {
             return Err(DebuggerError::Other(anyhow!(

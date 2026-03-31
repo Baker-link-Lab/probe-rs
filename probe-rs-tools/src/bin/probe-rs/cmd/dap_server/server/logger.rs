@@ -127,7 +127,7 @@ impl DebugLogger {
         let environment_filter = if std::env::var("RUST_LOG").is_ok() {
             EnvFilter::from_default_env()
         } else {
-            EnvFilter::new("probe_rs=warn")
+            EnvFilter::new("probe_rs=warn,probe_rs_tools=warn")
         };
 
         match log_file {
