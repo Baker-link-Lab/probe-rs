@@ -25,7 +25,7 @@ use base64::{Engine as _, engine::general_purpose as base64_engine};
 use dap_types::*;
 use parse_int::parse;
 use probe_rs::{
-    CoreInformation, CoreStatus, Error, HaltReason, MemoryInterface,
+    CoreInformation, CoreStatus, Error, HaltReason,
     architecture::{
         arm::ArmError, riscv::communication_interface::RiscvError,
         xtensa::communication_interface::XtensaError,
@@ -1868,32 +1868,6 @@ impl<P: ProtocolAdapter + ?Sized> DebugAdapter<P> {
 
     /// Returns whether all cores are halted.
     pub(crate) fn continue_impl(&mut self, target_core: &mut CoreHandle<'_>) -> Result<bool> {
-        // Log current PC and breakpoint cache before running the core.
-        let pc = target_core
-            .core
-            .read_core_reg::<u64>(target_core.core.program_counter())
-            .map(|v| format!("{v:#010X}"))
-            .unwrap_or_else(|_| "?".to_string());
-        let bp_summary: Vec<String> = target_core
-            .core_data
-            .breakpoints
-            .iter()
-            .map(|bp| format!("{:#010X}", bp.address))
-            .collect();
-        // Read FPB hardware registers right before run() to verify state.
-        let fp_ctrl = target_core.core.read_word_32(0xE000_2000).map(|v| format!("{v:#010X}")).unwrap_or_else(|_| "err".to_string());
-        let fp_comp0 = target_core.core.read_word_32(0xE000_2008).map(|v| format!("{v:#010X}")).unwrap_or_else(|_| "err".to_string());
-        tracing::warn!(
-            "[BP] continue: PC={}, FP_CTRL={}, FP_COMP0={}, registered breakpoints → [{}]",
-            pc,
-            fp_ctrl,
-            fp_comp0,
-            if bp_summary.is_empty() {
-                "none".to_string()
-            } else {
-                bp_summary.join(", ")
-            }
-        );
         target_core.core.run()?;
         target_core.reset_core_status(self);
 

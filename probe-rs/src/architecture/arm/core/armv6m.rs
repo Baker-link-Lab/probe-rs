@@ -782,16 +782,9 @@ impl CoreInterface for Armv6m<'_> {
         value.set_key(true);
         value.set_enable(state);
 
-        let write_val: u32 = value.into();
         self.memory
-            .write_word_32(BpCtrl::get_mmio_address(), write_val)?;
+            .write_word_32(BpCtrl::get_mmio_address(), value.into())?;
         self.memory.flush()?;
-
-        let readback = self.memory.read_word_32(BpCtrl::get_mmio_address())?;
-        tracing::warn!(
-            "[FPB] enable_breakpoints({}) wrote={:#010X} readback FP_CTRL={:#010X}",
-            state, write_val, readback
-        );
 
         self.state.hw_breakpoints_enabled = state;
 
