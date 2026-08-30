@@ -857,26 +857,24 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                 Ok(VerifiedBreakpoint {
                     address,
                     source_location,
-                }) => {
-                    Breakpoint {
-                        column: source_location.column.map(|col| match col {
-                            ColumnType::LeftEdge => 0_i64,
-                            ColumnType::Column(c) => c as i64,
-                        }),
-                        end_column: None,
-                        end_line: None,
-                        id: Some(address as i64),
-                        line: source_location.line.map(|line| line as i64),
-                        message: Some(format!(
-                            "Source breakpoint at memory address: {address:#010X}"
-                        )),
-                        source: Some(args.source.clone()),
-                        instruction_reference: Some(format!("{address:#010X}")),
-                        offset: None,
-                        verified: true,
-                        reason: None,
-                    }
-                }
+                }) => Breakpoint {
+                    column: source_location.column.map(|col| match col {
+                        ColumnType::LeftEdge => 0_i64,
+                        ColumnType::Column(c) => c as i64,
+                    }),
+                    end_column: None,
+                    end_line: None,
+                    id: Some(address as i64),
+                    line: source_location.line.map(|line| line as i64),
+                    message: Some(format!(
+                        "Source breakpoint at memory address: {address:#010X}"
+                    )),
+                    source: Some(args.source.clone()),
+                    instruction_reference: Some(format!("{address:#010X}")),
+                    offset: None,
+                    verified: true,
+                    reason: None,
+                },
                 Err(error) => {
                     self.log_to_console(format!(
                         "[BP] UNVERIFIED breakpoint: path={} line={} -> {}",
@@ -1104,8 +1102,10 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                                     let suffix = suffix.replace('/', "\\");
                                     #[cfg(not(windows))]
                                     let suffix = suffix.to_string();
-                                    let host_path =
-                                        std::path::PathBuf::from(format!("{}{}", m.local_root, suffix));
+                                    let host_path = std::path::PathBuf::from(format!(
+                                        "{}{}",
+                                        m.local_root, suffix
+                                    ));
                                     if host_path.exists() {
                                         // Host file found: update name and clear deemphasize.
                                         source.name = host_path

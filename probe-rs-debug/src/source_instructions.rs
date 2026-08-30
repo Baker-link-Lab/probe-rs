@@ -166,11 +166,13 @@ impl VerifiedBreakpoint {
         if let Some(first_unit) = debug_info.unit_infos.first() {
             if let Some(ref line_program) = first_unit.unit.line_program {
                 let header = line_program.header();
-                let n = header
-                    .file_names()
-                    .len()
-                    .min(4)
-                    .saturating_add(if first_unit.unit.header.version() <= 4 { 1 } else { 0 });
+                let n = header.file_names().len().min(4).saturating_add(
+                    if first_unit.unit.header.version() <= 4 {
+                        1
+                    } else {
+                        0
+                    },
+                );
                 for file_index in 0..n as u64 {
                     if let Some(p) = debug_info.get_path(&first_unit.unit, file_index) {
                         tracing::info!(

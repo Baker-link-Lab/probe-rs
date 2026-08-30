@@ -261,6 +261,7 @@ impl Cmd {
                     wire_protocol: self.common.protocol,
                     allow_erase_all: false,
                     flashing_config: FlashingConfig::default(),
+                    path_mappings: Vec::new(),
                     core_configs: vec![CoreConfig {
                         core_index: self.shared.core,
                         program_binary: self.exe,

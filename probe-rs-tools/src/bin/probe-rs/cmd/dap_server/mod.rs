@@ -126,11 +126,31 @@ pub async fn run_with_shutdown_on_port(
     time_offset: UtcOffset,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let cmd = Cmd {
-        port,
-        ip: Ipv4Addr::LOCALHOST.into(),
+    run_with_shutdown_on_addr(
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
         single_session,
-    };
+        log_file,
+        time_offset,
+        shutdown,
+    )
+    .await
+}
+
+pub async fn run_with_shutdown_on_addr(
+    addr: SocketAddr,
+    single_session: bool,
+    log_file: Option<&Path>,
+    time_offset: UtcOffset,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let lister = Lister::new();
-    run_with_shutdown(cmd, &lister, time_offset, log_file, shutdown).await
+    debug_with_shutdown(
+        &lister,
+        addr,
+        single_session,
+        log_file,
+        time_offset,
+        Some(shutdown),
+    )
+    .await
 }

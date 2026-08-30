@@ -107,8 +107,11 @@ impl SessionConfig {
             // Apply path mappings before resolving & validating paths,
             // translating container prefixes (e.g. /myproject) to host paths.
             if let Some(p) = target_core_config.program_binary.clone() {
-                target_core_config.program_binary =
-                    Some(translate_path_to_local(&path_mappings, &p));
+                target_core_config.program_binary = Some(resolve_bakerlink_artifact(&p)?);
+                if let Some(resolved) = target_core_config.program_binary.clone() {
+                    target_core_config.program_binary =
+                        Some(translate_path_to_local(&path_mappings, &resolved));
+                }
             }
             if let Some(p) = target_core_config.svd_file.clone() {
                 target_core_config.svd_file = Some(translate_path_to_local(&path_mappings, &p));
@@ -211,6 +214,41 @@ impl SessionConfig {
             allow_erase_all: self.allow_erase_all,
         }
     }
+}
+
+fn resolve_bakerlink_artifact(path: &PathBuf) -> Result<PathBuf, DebuggerError> {
+    let value = path.to_string_lossy();
+    let Some(identifier) = value.strip_prefix("bakerlink://") else {
+        return Ok(path.clone());
+    };
+    let mut parts = identifier.split('/');
+    let project = parts.next().unwrap_or_default();
+    let profile = parts.next().unwrap_or_default();
+    if parts.next().is_some() || !valid_artifact_id(project) || !valid_artifact_id(profile) {
+        return Err(DebuggerError::Other(anyhow!(
+            "Invalid Baker Link artifact identifier '{value}'"
+        )));
+    }
+    let root = std::env::var_os("BAKER_LINK_ARTIFACT_ROOT").ok_or_else(|| {
+        DebuggerError::Other(anyhow!("Baker Link artifact storage is not configured"))
+    })?;
+    let resolved = PathBuf::from(root)
+        .join(project)
+        .join(format!("{profile}.elf"));
+    if !resolved.is_file() {
+        return Err(DebuggerError::Other(anyhow!(
+            "ELF artifact '{project}/{profile}' has not been uploaded. Run the Baker Link pre-launch task and try again"
+        )));
+    }
+    Ok(resolved)
+}
+
+fn valid_artifact_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 /// If the path to the program to be debugged is relative, we join if with the cwd.
@@ -349,5 +387,47 @@ impl std::str::FromStr for ConsoleLog {
                 "'{s}' is not a valid console log level. Choose from [console, info, or debug]."
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn resolves_uploaded_bakerlink_artifact() {
+        let _guard = env_lock();
+        let root = std::env::temp_dir().join(format!(
+            "baker-link-resolver-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let artifact = root.join("example/debug.elf");
+        fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        fs::write(&artifact, b"elf").unwrap();
+        unsafe { std::env::set_var("BAKER_LINK_ARTIFACT_ROOT", &root) };
+
+        assert_eq!(
+            resolve_bakerlink_artifact(&PathBuf::from("bakerlink://example/debug")).unwrap(),
+            artifact
+        );
+        assert!(resolve_bakerlink_artifact(&PathBuf::from("bakerlink://../debug")).is_err());
+        assert!(resolve_bakerlink_artifact(&PathBuf::from("bakerlink://example/release")).is_err());
+        let ordinary = PathBuf::from("target/debug/example");
+        assert_eq!(resolve_bakerlink_artifact(&ordinary).unwrap(), ordinary);
+
+        unsafe { std::env::remove_var("BAKER_LINK_ARTIFACT_ROOT") };
+        fs::remove_dir_all(root).unwrap();
     }
 }

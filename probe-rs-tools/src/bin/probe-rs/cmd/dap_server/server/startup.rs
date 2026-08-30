@@ -5,8 +5,13 @@ use probe_rs::{config::Registry, probe::list::Lister};
 use serde::Deserialize;
 use std::{
     fs,
-    net::TcpListener,
+    net::{Shutdown, TcpListener},
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
     time::{Duration, UNIX_EPOCH},
 };
 use time::UtcOffset;
@@ -69,7 +74,10 @@ pub async fn debug_with_shutdown(
     }));
 
     'server: loop {
-        if shutdown.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        if shutdown
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
             break;
         }
         let listener = TcpListener::bind(addr)?;
@@ -86,16 +94,17 @@ pub async fn debug_with_shutdown(
         listener.set_nonblocking(true)?;
 
         loop {
-            if shutdown.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            if shutdown
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
                 break 'server;
             }
 
             match listener.accept() {
                 Ok((socket, addr)) => {
                     socket.set_nonblocking(true).with_context(|| {
-                        format!(
-                            "Failed to negotiate non-blocking socket with request from: {addr}"
-                        )
+                        format!("Failed to negotiate non-blocking socket with request from: {addr}")
                     })?;
 
                     debugger
@@ -105,6 +114,24 @@ pub async fn debug_with_shutdown(
                     let reader = socket
                         .try_clone()
                         .context("Failed to establish a bi-directional Tcp connection.")?;
+                    let session_finished = Arc::new(AtomicBool::new(false));
+                    let shutdown_watcher = shutdown.as_ref().map(|shutdown| {
+                        let shutdown = shutdown.clone();
+                        let shutdown_socket = socket.try_clone();
+                        let session_finished = session_finished.clone();
+                        thread::spawn(move || {
+                            while !shutdown.is_cancelled()
+                                && !session_finished.load(Ordering::Acquire)
+                            {
+                                thread::sleep(Duration::from_millis(25));
+                            }
+                            if shutdown.is_cancelled()
+                                && let Ok(socket) = shutdown_socket
+                            {
+                                let _ = socket.shutdown(Shutdown::Both);
+                            }
+                        })
+                    });
                     let writer = socket;
 
                     let dap_adapter = DapAdapter::new(reader, writer);
@@ -126,6 +153,10 @@ pub async fn debug_with_shutdown(
                         }
                         Ok(()) => format!("Closing debug session from: {addr}"),
                     };
+                    session_finished.store(true, Ordering::Release);
+                    if let Some(watcher) = shutdown_watcher {
+                        let _ = watcher.join();
+                    }
                     debugger.debug_logger.log_to_console(&end_message)?;
 
                     // Terminate after a single debug session. This is the behaviour expected by VSCode
