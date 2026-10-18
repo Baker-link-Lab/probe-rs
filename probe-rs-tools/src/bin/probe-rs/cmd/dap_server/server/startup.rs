@@ -73,6 +73,9 @@ pub async fn debug_with_shutdown(
         old_hook(panic_info);
     }));
 
+    let listener = TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+
     'server: loop {
         if shutdown
             .as_ref()
@@ -80,8 +83,6 @@ pub async fn debug_with_shutdown(
         {
             break;
         }
-        let listener = TcpListener::bind(addr)?;
-
         debugger
             .debug_logger
             .log_to_console(&format!("Listening for requests on port {}", addr.port()))?;
@@ -90,8 +91,6 @@ pub async fn debug_with_shutdown(
             // When running as a server from the command line, we want startup logs to go to the stderr.
             debugger.debug_logger.flush()?;
         }
-
-        listener.set_nonblocking(true)?;
 
         loop {
             if shutdown
@@ -134,17 +133,24 @@ pub async fn debug_with_shutdown(
                     });
                     let writer = socket;
 
-                    let dap_adapter = DapAdapter::new(reader, writer);
-                    let mut debug_adapter = DebugAdapter::new(dap_adapter);
+                    let session_result = async {
+                        let dap_adapter = DapAdapter::new(reader, writer);
+                        let mut debug_adapter = DebugAdapter::new(dap_adapter);
+                        debugger.debug_logger.flush_to_dap(&mut debug_adapter)?;
+                        let mut registry = Registry::from_builtin_families();
+                        debugger
+                            .debug_session(&mut registry, debug_adapter, lister)
+                            .await
+                    }
+                    .await;
 
-                    // Flush any pending log messages to the debug adapter Console Log.
-                    debugger.debug_logger.flush_to_dap(&mut debug_adapter)?;
-
-                    let mut registry = Registry::from_builtin_families();
-                    let end_message = match debugger
-                        .debug_session(&mut registry, debug_adapter, lister)
-                        .await
-                    {
+                    session_finished.store(true, Ordering::Release);
+                    if let Some(watcher) = shutdown_watcher {
+                        watcher
+                            .join()
+                            .map_err(|_| anyhow::anyhow!("DAP shutdown watcher panicked"))?;
+                    }
+                    let end_message = match session_result {
                         // We no longer have a reference to the `debug_adapter`, so errors need
                         // special handling to ensure they are displayed to the user.
                         Err(error) => {
@@ -153,10 +159,6 @@ pub async fn debug_with_shutdown(
                         }
                         Ok(()) => format!("Closing debug session from: {addr}"),
                     };
-                    session_finished.store(true, Ordering::Release);
-                    if let Some(watcher) = shutdown_watcher {
-                        let _ = watcher.join();
-                    }
                     debugger.debug_logger.log_to_console(&end_message)?;
 
                     // Terminate after a single debug session. This is the behaviour expected by VSCode

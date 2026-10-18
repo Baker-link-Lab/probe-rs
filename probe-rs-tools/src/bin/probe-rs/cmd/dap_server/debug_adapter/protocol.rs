@@ -270,7 +270,24 @@ impl<R: Read, W: Write> DapAdapter<R, W> {
     /// Receive data from `self.input`. Data has to be in the format specified by the Debug Adapter Protocol (DAP).
     /// The returned data is the content part of the request, as raw bytes.
     fn receive_data(&mut self) -> Result<Option<Frame<Message>>, DebuggerError> {
+        // Drain complete buffered messages before reading again, including before EOF.
+        if let Some(frame) = self.codec.decode(&mut self.input_buffer)? {
+            return Ok(Some(frame));
+        }
+
         match self.input.fill_buf() {
+            Ok([]) => {
+                let (kind, message) =
+                    if self.input_buffer.is_empty() && !self.codec.has_partial_frame() {
+                        (ErrorKind::ConnectionAborted, "DAP client disconnected")
+                    } else {
+                        (
+                            ErrorKind::UnexpectedEof,
+                            "DAP client disconnected in the middle of a message",
+                        )
+                    };
+                return Err(std::io::Error::new(kind, message).into());
+            }
             Ok(data) => {
                 // New data is here. Shove it into the buffer.
                 self.input_buffer.extend_from_slice(data);
@@ -489,6 +506,83 @@ mod test {
         insta::assert_snapshot!(output_str);
 
         assert!(request.is_none());
+    }
+
+    #[test]
+    fn receive_eof_ends_session() {
+        let mut adapter = DapAdapter::new(io::empty(), Vec::new());
+        let error = adapter.receive_data().unwrap_err();
+        assert!(matches!(
+            error,
+            DebuggerError::StdIO(ref error) if error.kind() == ErrorKind::ConnectionAborted
+        ));
+    }
+
+    #[test]
+    fn receive_buffered_requests_before_eof() {
+        let content = r#"{"seq":1,"type":"request","command":"threads"}"#;
+        let frame = format!("Content-Length: {}\r\n\r\n{content}", content.len());
+        let input = frame.repeat(2);
+        let mut adapter = DapAdapter::new(input.as_bytes(), Vec::new());
+        for _ in 0..2 {
+            assert_eq!(
+                adapter.listen_for_request().unwrap().unwrap().command,
+                "threads"
+            );
+        }
+        assert!(adapter.listen_for_request().is_err());
+    }
+
+    #[test]
+    fn receive_truncated_message_reports_eof() {
+        for input in [
+            "Content-Len",
+            "Content-Length: 100\r\n",
+            "Content-Length: 100\r\n\r\n",
+            "Content-Length: 100\r\n\r\n{",
+        ] {
+            let mut adapter = DapAdapter::new(input.as_bytes(), Vec::new());
+            assert!(adapter.receive_data().unwrap().is_none());
+            let error = adapter.receive_data().unwrap_err();
+            assert!(matches!(
+                error,
+                DebuggerError::StdIO(ref error) if error.kind() == ErrorKind::UnexpectedEof
+            ));
+        }
+    }
+
+    #[test]
+    fn receive_fragmented_request_after_would_block() {
+        use std::collections::VecDeque;
+
+        struct FragmentedReader(VecDeque<io::Result<Vec<u8>>>);
+        impl Read for FragmentedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                match self.0.pop_front().unwrap() {
+                    Ok(data) => {
+                        buffer[..data.len()].copy_from_slice(&data);
+                        Ok(data.len())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        }
+
+        let content = r#"{"seq":1,"type":"request","command":"threads"}"#;
+        let input = FragmentedReader(VecDeque::from([
+            Ok(format!("Content-Length: {}\r\n\r\n", content.len()).into_bytes()),
+            Err(io::Error::from(ErrorKind::WouldBlock)),
+            Ok(content.as_bytes().to_vec()),
+            Ok(Vec::new()),
+        ]));
+        let mut adapter = DapAdapter::new(input, Vec::new());
+        assert!(adapter.listen_for_request().unwrap().is_none());
+        assert!(adapter.listen_for_request().unwrap().is_none());
+        assert_eq!(
+            adapter.listen_for_request().unwrap().unwrap().command,
+            "threads"
+        );
+        assert!(adapter.listen_for_request().is_err());
     }
 
     struct FailingWriter {}

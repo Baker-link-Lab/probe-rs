@@ -21,6 +21,10 @@ impl<T: Serialize + for<'a> Deserialize<'a> + PartialEq> DapCodec<T> {
             _pd: PhantomData,
         }
     }
+
+    pub(crate) fn has_partial_frame(&self) -> bool {
+        self.length.is_some() || self.header_received
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
