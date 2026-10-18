@@ -1,3 +1,5 @@
+pub mod artifact_cache;
+
 pub mod cmd {
     #[path = "../bin/probe-rs/cmd/dap_server/mod.rs"]
     pub mod dap_server;

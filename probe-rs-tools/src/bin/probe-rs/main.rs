@@ -2,6 +2,8 @@ mod cmd;
 mod report;
 mod rpc;
 mod util;
+#[path = "../../artifact_cache.rs"]
+pub mod artifact_cache;
 
 use std::cmp::Reverse;
 use std::collections::HashMap;

@@ -30,6 +30,8 @@ pub struct PathMapping {
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionConfig {
+    #[serde(skip)]
+    pub(crate) artifact_leases: Vec<std::sync::Arc<crate::artifact_cache::Lease>>,
     /// Level of information to be logged to the debugger console (Error, Info or Debug)
     #[serde(default = "default_console_log")]
     pub(crate) console_log_level: Option<ConsoleLog>,
@@ -107,7 +109,12 @@ impl SessionConfig {
             // Apply path mappings before resolving & validating paths,
             // translating container prefixes (e.g. /myproject) to host paths.
             if let Some(p) = target_core_config.program_binary.clone() {
-                target_core_config.program_binary = Some(resolve_bakerlink_artifact(&p)?);
+                let resolved = resolve_bakerlink_artifact(&p)?;
+                if p.to_string_lossy().starts_with("bakerlink://") {
+                    self.artifact_leases
+                        .push(crate::artifact_cache::acquire(&resolved)?);
+                }
+                target_core_config.program_binary = Some(resolved);
                 if let Some(resolved) = target_core_config.program_binary.clone() {
                     target_core_config.program_binary =
                         Some(translate_path_to_local(&path_mappings, &resolved));
@@ -426,6 +433,37 @@ mod tests {
         assert!(resolve_bakerlink_artifact(&PathBuf::from("bakerlink://example/release")).is_err());
         let ordinary = PathBuf::from("target/debug/example");
         assert_eq!(resolve_bakerlink_artifact(&ordinary).unwrap(), ordinary);
+
+        let mut config = SessionConfig {
+            core_configs: vec![CoreConfig {
+                program_binary: Some(PathBuf::from("bakerlink://example/debug")),
+                ..CoreConfig::default()
+            }],
+            ..SessionConfig::default()
+        };
+        config.validate_config_files().unwrap();
+        assert_eq!(
+            config.core_configs[0].program_binary.as_ref(),
+            Some(&artifact)
+        );
+        assert_eq!(
+            crate::artifact_cache::lock()
+                .unwrap()
+                .clear_unused(&root)
+                .unwrap()
+                .active_files,
+            1
+        );
+        assert!(artifact.exists());
+        drop(config);
+        assert_eq!(
+            crate::artifact_cache::lock()
+                .unwrap()
+                .clear_unused(&root)
+                .unwrap()
+                .files,
+            0
+        );
 
         unsafe { std::env::remove_var("BAKER_LINK_ARTIFACT_ROOT") };
         fs::remove_dir_all(root).unwrap();

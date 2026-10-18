@@ -270,6 +270,19 @@ impl Debugger {
     pub(crate) async fn debug_session<P: ProtocolAdapter>(
         &mut self,
         registry: &mut Registry,
+        debug_adapter: DebugAdapter<P>,
+        lister: &Lister,
+    ) -> Result<(), DebuggerError> {
+        let result = self
+            .debug_session_inner(registry, debug_adapter, lister)
+            .await;
+        self.config.artifact_leases.clear();
+        result
+    }
+
+    async fn debug_session_inner<P: ProtocolAdapter>(
+        &mut self,
+        registry: &mut Registry,
         mut debug_adapter: DebugAdapter<P>,
         lister: &Lister,
     ) -> Result<(), DebuggerError> {

@@ -251,6 +251,7 @@ impl Cmd {
             .send(Request {
                 command: "attach".to_string(),
                 arguments: serde_json::to_value(&SessionConfig {
+                    artifact_leases: Vec::new(),
                     console_log_level: None,
                     cwd: None,
                     probe: self.common.probe,
